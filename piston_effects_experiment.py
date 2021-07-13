@@ -17,6 +17,7 @@ import scipy.fftpack as sfft
 import matplotlib.pyplot as plt
 from mpl_toolkits import mplot3d
 import scipy.signal as sig 
+import matplotlib.gridspec as gridspec
 os.chdir('/Users/bcourtne/Documents/Hi5/vibration_analysis/utilites')
 
 import fiber_fields as fields
@@ -110,7 +111,7 @@ def init_phase_screens(r0,L0,wvl,V, dt, D_pixels,pixel_scale,iterations):
 #aaa=init_phase_screens(r0,L0,wvl,V_w, dt, D_pixels=D_pixel,pixel_scale=dfX,iterations=2e3)
 
 # --- function 2
-def AO_correction(screens, dt, no_modes_corrected, D_pixel, pupil_definitions_dict):
+def AO_correction(screens, dt, V, dfx, no_modes_corrected, D_pixel, pupil_definitions_dict):
     """
     
 
@@ -145,7 +146,8 @@ def AO_correction(screens, dt, no_modes_corrected, D_pixel, pupil_definitions_di
     None.
 
     """
-    
+    #how lagged is the sensed screen from the current screen
+    framelag = int(V * dt / dfX)
     N_modes_considered = no_modes_corrected + 1
     #no_modes_corrected = N_modes_considered + 1
     
@@ -216,8 +218,11 @@ def AO_correction(screens, dt, no_modes_corrected, D_pixel, pupil_definitions_di
                     
             ###### -------- PISTON FREE DEFINITIONS ---------- #########
             #use the 'piston free pupil' for the mask on the DM (index 1) 
-            #DM_shape = DM_shape - np.nanmean(pm[1] * DM_shape) 
-            DM_shape = DM_shape - np.nansum(pm[1] * DM_shape * dfX**2) / np.nansum(pm[1] * dfX**2)
+            AO_piston_basis = pm[1] * 1/np.sqrt(np.nansum(pm[1]**2 * dfX**2 )) # <P|P>=1
+            
+            DM_shape = DM_shape - np.nansum(AO_piston_basis * DM_shape *dfX**2) * AO_piston_basis
+            
+            #DM_shape = DM_shape - np.nansum(pm[1] * DM_shape * dfX**2) / np.nansum(pm[1] * dfX**2)
             
             ###### ------------------------------------------ #########    
             #print(np.nanmean(DM_pf0))
@@ -234,39 +239,7 @@ def AO_correction(screens, dt, no_modes_corrected, D_pixel, pupil_definitions_di
     return(AO_correction_dict)
 
 
-def fiber_coupling(pupil_mask, AO_corrected_screens , dfX):
-    """
-    Parameters
-    ----------
-    fiber_field_in_pupil : TYPE
-        DESCRIPTION.  
-    pupil_mask : TYPE
-        DESCRIPTION. - APODIZED WEIGHTED PUPIL MASK
-    AO_corrected_screens : TYPE
-        DESCRIPTION.
-    dfX : TYPE
-        DESCRIPTION.
 
-    Returns
-    -------
-    None.
-
-    """
-    
-    coupled_field = []
-    if AO_corrected_screens[0].shape[0] > pupil_mask.shape[0]: #need to crop fiber field to fit pupil mask
-        print( 'WARNING: cropping fiber field to fit pupil mask' )
-        for acs in AO_corrected_screens: #need to crop fiber field to fit pupil mask
-            coupled_field.append( np.nansum(np.exp(-1j*pupil_mask) * crop_big_array(acs,pupil_mask) * dfX**2) )
-    elif AO_corrected_screens[0].shape[0] == pupil_mask.shape[0]:
-        for acs in AO_corrected_screens:
-            coupled_field.append( np.nansum(np.exp(-1j*pupil_mask) * acs * dfX**2) )
-    else:
-        raise TypeError('pupil mask array is bigger than fiber field array in pupil')
-    
-    return(coupled_field)
-    
-  
 def crop_big_array(big_array, small_array):
     #crop big array to be centered in small array  (assuming both are square!!!)
 
@@ -274,10 +247,169 @@ def crop_big_array(big_array, small_array):
     yyy = big_array.shape[0]
     return(big_array[(yyy-xxx)//2:(yyy+xxx)//2 , (yyy-xxx)//2:(yyy+xxx)//2 ] )
 
-#%% piston PSD vs correct / incorrect pupil definitions with varying obscuration size
+#%%
 
-M2_ratios = [4,8,16,32,64]
-labels = [f'D/{x}' for x in M2_ratios]
+#test 
+
+#go to pupil plane (its real in the focal plane so reasonable to enforce that its real in pupil also (take abs))
+fiber_field_pp = abs(sfft.fftshift(sfft.ifft2(fiber_field_ip)) )
+#normalization from (Perrin, Woillez 2019) np.nansum(abs(fiber_field_pp)**2 * dfX**2) = 1 
+fiber_field_pp *= 1/np.sqrt(np.nansum(abs(fiber_field_pp)**2 * dfX**2 ))
+
+# remember its fiber field, and then phase screens!!! 
+test_pupil_mask = np.ones(fiber_field_pp.shape)
+#test_pupil_mask *= 1/(np.nansum(test_pupil_mask))# * dfX**2)
+test_object_field = test_pupil_mask * np.exp(-1j*np.angle(fiber_field_pp))
+
+#test that we get 1 for perfect overlap without telescope pupil
+eta = fiber_coupling_eta(test_pupil_mask, fiber_field_pp, [np.angle(fiber_field_pp)] , dfX)
+print('for perfect overlap eta = 1.. calculated here: eta = {}'.format(eta))
+#for fiber parameters and clear telescope pupil what is maximum efficiency 
+eta = fiber_coupling_eta(pupil_mask, fiber_field_pp, [np.angle(fiber_field_pp)] , dfX)
+print('for fiber parameters and clear telescope pupil maximum efficiency eta = {}'.format(eta))
+#for fiber parameters and clear telescope pupil with central obscuration (VLT) what is maximum efficiency 
+eta = fiber_coupling_eta(pupil_obs_mask, fiber_field_pp, [np.angle(fiber_field_pp)] , dfX)
+print('for fiber parameters and clear telescope pupil with central obscuration (VLT) maximum efficiency eta = {}'.format(eta))
+
+
+#np.exp(1j * np.angle(fiber_field_pp))
+
+#with perfect coupling coupled field power = before coupling power. i.e.
+#np.nansum(fiber_field_pp**2 * dfX**2) == np.nansum((eta * fiber_field_pp)**2 * dfX**2) => eta = 1
+#print(eta, np.nansum(test_pupil_mask * fiber_field_pp * dfX**2))
+#print( abs( np.nansum(fiber_field_pp**2 * dfX**2)), abs( np.nansum((eta * fiber_field_pp)**2 * dfX**2) ) )
+
+#print( abs(fiber_coupling(pupil_mask,fiber_field_pp, [fiber_field_pp] , dfX)  ) )
+
+#%% ========== atmopsheric piston vs zernike PSDs ================
+
+#basic parameter setup
+col2move = 2
+print('each iteration moves screen by col2move * dfX = {}m'.format(col2move * dfX))
+#master screen
+r0 = 0.1 #m (at 500nm)
+L0 = 25 #m
+wvl = 2.2e-6 #m
+seeing = (0.5/2.2)**(6/5) * 0.98*wvl/r0 * 3600 * 180/np.pi #arcsec (at 500nm)
+dt = 1e-3 
+V_w = col2move * dfX / dt 
+screens = init_phase_screens(r0,L0,wvl,V_w, dt, D_pixel,pixel_scale=dfX,iterations=1e3)
+
+screen_piston = [np.nanmean(screens[i]*pupil_mask) for i in range(len(screens))]
+screen_obs_piston = [np.nanmean(screens[i]*pupil_obs_mask) for i in range(len(screens))]
+
+#consider 1st 50 zernikes (include piston)
+zernikes = [aotools.functions.zernike.zernike_noll(m+1,int(D_pixel)) for m in range(50)]
+
+screen_zernikes = [[dfX**2 * np.nansum(screens[i]*pupil_obs_mask * zernikes[j]) for i in range(len(screens))] for j in range(len(zernikes))]
+zernike_psds = [sig.welch(p, fs=1/dt , nperseg=2**9, window='hann',detrend='linear') for p in screen_zernikes]
+
+
+for i, psd in enumerate(zernike_psds):
+    if i==0:        
+        plt.loglog(*psd,color='r',alpha=1,label='piston')
+    if i==1:        
+        plt.loglog(*psd,color='k',alpha=0.1,label=r'$Z_i$')
+    else:
+        plt.loglog(*psd,color='k',alpha=0.1)
+plt.loglog(psd[0],1e8*psd[0]**(-17/3),linestyle='--',label=r'$f^{-17/3}$')
+plt.gca().tick_params(labelsize=15)
+plt.xlabel('Frequency (Hz)',fontsize=20)
+plt.ylabel(r'PSD $(rad^2/Hz)$',fontsize=20)
+plt.legend(fontsize=13)
+plt.text(3,1e-8,r'$\lambda$={}$\mu m$, D={}m, $r_0$={}m, $L_0$=25m, V={}m/s'.format(1e6*wvl, D,r0,L0,V_w))
+#define the time stamps, note that sampling rate effectively determines wind speed parameter 
+
+
+#get mean zernike coefficients with / without obscured pupil mask 
+#zernikes = [aotools.functions.zernike.zernike_noll(m+1,int(D_pixel)) for m in range(50)]
+#screen_zernikes_1 = [[dfX**2 * np.nansum(screens[i]*pupil_mask * zernikes[j]) for i in range(len(screens))] for j in range(50)]
+#screen_zernikes_2 = [[dfX**2 * np.nansum(screens[i]*pupil_obs_mask * zernikes[j]) for i in range(len(screens))] for j in range(50)]
+
+#JUst want to project zernikes onto normalized centrally obscured pupil
+zernikes = [aotools.functions.zernike.zernike_noll(m+2,int(D_pixel)) for m in range(200)]
+#zernikes = [zzz*1/np.nansum(dfX**2*zzz**2) for zzz in zernikes]
+pupil_obs_mask_norm = 1/np.nansum(pupil_obs_mask**2*dfX**2) * pupil_obs_mask #<P|P>1
+zerike2pup_obs_projection = [dfX**2 * np.nansum(pupil_obs_mask_norm * zzz) for zzz in zernikes]
+
+from mpl_toolkits.axes_grid.inset_locator import inset_axes
+plt.figure()
+#plt.plot(np.mean(screen_zernikes_1,axis=1),'.',label='without obscuration')
+plt.plot(zerike2pup_obs_projection,'.',label='coefficient')
+plt.plot(np.cumsum(zerike2pup_obs_projection),label='cummulative')
+plt.legend(bbox_to_anchor=(1,1),fontsize=12)
+plt.gca().tick_params(labelsize=15)
+plt.xlabel('Zernike Noll index (i)',fontsize=20)
+plt.ylabel(r'$\langle Z_i|P \rangle$',fontsize=20)
+# this is an inset axes over the main axes
+ins = plt.gca().inset_axes([1.05,0.2,0.2,0.5],aspect=1)
+ins.imshow(pupil_obs_mask_norm)
+ins.text(1,1,r'$|P\rangle$',fontsize=15)
+ins.axis('off')
+#inset_axes = inset_axes(plt.gca()), 
+#                    width=1, #"50%", # width = 30% of parent_bbox
+#                    height=1.0, # height : 1 inch
+#                    loc=2)
+
+
+
+#How pure zernikes with central obscuration cross couple to piston 
+
+#initialize parameters and fiber field array in image plane
+a = 1e-6 #fiber core diameter
+NA = .45 #numerical apperature 
+n_core=2 #refractive index of core
+fiber_field_ip = np.nan*np.ones([len(x),len(x)])
+#calculate it
+for i,x_row in enumerate(x):
+    #if np.mod(i,100)==0:
+    #    print('{}% complete'.format(i/len(x)))
+    fiber_field_ip[i,:] = [fields.gaussian_field(NA=NA,n_core=2.7,a=a,L=wvl,r=np.sqrt(x_row**2 + x_col**2)) for x_col in x]
+
+#go to pupil plane (its real in the focal plane so reasonable to enforce that its real in pupil also (take abs))
+fiber_field_pp = abs(sfft.fftshift(sfft.ifft2(fiber_field_ip)) )
+#normalization from (Perrin, Woillez 2019) np.nansum(abs(fiber_field_pp)**2 * dfX**2) = 1 
+fiber_field_pp *= 1/np.sqrt(np.nansum(abs(fiber_field_pp)**2 * dfX**2 ))
+
+#normalize pupil mask <P|P> = 1 
+pupil_mask_norm = pupil_mask/np.nansum(pupil_mask * pupil_mask)
+#normalize pupil mask <P|P> = 1 
+pupil_obs_mask_norm = pupil_obs_mask/np.nansum(pupil_obs_mask * pupil_obs_mask )
+#includes piston, and apply nan mask to zernikes  
+zernikes = [pupil_mask * aotools.functions.zernike.zernike_noll(m+2,int(D_pixel)) for m in range(200)]
+
+apodized_zernikes = [pupil_mask * crop_big_array(fiber_field_pp,pupil_mask) * aotools.functions.zernike.zernike_noll(m+2,int(D_pixel)) for m in range(200)]
+
+plt.plot(range(2,len(zernikes)+2,1),[np.nansum(pupil_mask_norm * zzz) for zzz in zernikes],label='circular pupil')
+plt.plot(range(2,len(zernikes)+2,1),[np.nansum(pupil_obs_mask_norm * zzz) for zzz in zernikes],label='donut pupil')
+#plt.plot(range(2,len(zernikes)+2,1),[np.nansum(pupil_mask_norm * zzz) for zzz in apodized_zernikes],label='apodized circular pupil')
+#plt.plot(range(2,len(zernikes)+2,1),[np.nansum(pupil_obs_mask_norm * zzz) for zzz in apodized_zernikes],label='apodized donut pupil')
+
+plt.legend()
+plt.xlabel('Noll index')
+plt.ylabel('piston (normalized)')
+
+#show in overlap integral that piston term comes out as constant...d
+
+#then take some non-zero coefficient of zernike coupling to piston and plot scaled zernike PSD vs piston 
+
+    
+#%% Simple circle donut cases - what does piston PSD look like for incorrect AO def
+
+
+#basic parameter setup
+col2move = 2
+print('each iteration moves screen by col2move * dfX = {}m'.format(col2move * dfX))
+#master screen
+r0 = 0.1 #m (at 500nm)
+L0 = 25 #m
+wvl = 2.2e-6 #m
+seeing = (0.5/2.2)**(6/5) * 0.98*wvl/r0 * 3600 * 180/np.pi #arcsec (at 500nm)
+dt = 1e-3 
+V_w = col2move * dfX / dt 
+
+## setting up different obscurations to test piston with incorrect pupil def in removal algorithm
+
 #[(real pupil, pupil def)] - keep pupil def as open pupil and the real pupil with different sizes
 """
 experiment:
@@ -287,14 +419,125 @@ experiment:
         we expect this to have the lowest OPD after AO correction
 """
 real_pupil_mask = pupil_obs_mask.copy()
-pupil_tuples = [(real_pupil_mask, pupil_m1 - aotools.functions.pupil.circle(radius=int(D_pixel/i), size=D_pixel, circle_centre=(0, 0), origin='middle')) for i in M2_ratios] 
+real_piston_basis = real_pupil_mask * 1/np.sqrt(np.nansum( real_pupil_mask**2 * dfX**2 ) )
+#---- for simple circle - donut test 
+pupil_tuples = [(pupil_obs_mask.copy(),  pupil_obs_mask.copy()), (pupil_obs_mask.copy(), pupil_mask.copy())]
+labels = ['donut','circle'] 
+
 for pp in pupil_tuples:
     pp[1][pp[1]==0]=np.nan #need to use nan mask
 pupil_definition_dict = {x:y for x,y in zip(labels, pupil_tuples)}
 
 #pupil_definition_dict = dict({'dd':(pupil_obs_mask, pupil_obs_mask),'dc':(pupil_obs_mask,pupil_mask)})
+screens = init_phase_screens(r0,L0,wvl,V_w, dt, D_pixel,pixel_scale=dfX,iterations=1e3)
+# time stamps for the screens
+t = np.arange(0, dt * len(screens), dt)
 no_modes_corrected = 50
-AO_correction_dict = AO_correction(screens, dt, no_modes_corrected, D_pixel, pupil_definition_dict )
+AO_correction_dict = AO_correction(screens, dt, V_w, dfX, no_modes_corrected, D_pixel, pupil_definition_dict )
+
+
+#get piston timeseries after DM under different pupil definitions  (takes 1 minute)
+#pistons_ts_after_A0 = [[ np.nanmean(p) for p in AO_correction_dict[x]['residual_screen'] ] for x in labels]
+pistons_ts_after_A0 = [[ np.nansum(real_piston_basis * p * dfX**2) for p in AO_correction_dict[x]['residual_screen'] ] for x in labels]
+
+#get piston timeseries before DM
+#piston_ts_before_A0 = [ np.nanmean(p) for p in AO_correction_dict['donut']['lagged_screen'] ]
+piston_ts_before_A0 = [ np.nansum(real_piston_basis * p * dfX**2) for p in AO_correction_dict['donut']['lagged_screen'] ]
+
+#get piston psd's from each timeseries
+pistons_psd_after_AO = [sig.welch(p, fs=1/dt , nperseg=2**9, window='hann',detrend='linear') for p in pistons_ts_after_A0]
+piston_psd_before_A0 = sig.welch(piston_ts_before_A0 , fs=1/dt , nperseg=2**9, window='hann',detrend='linear')
+#plotting
+
+
+
+import matplotlib.gridspec as gridspec
+fig = plt.figure(tight_layout=True,figsize=(16,6))
+gs = gridspec.GridSpec(6, 16)
+
+ax0 = fig.add_subplot(gs[:, :8])
+ax1 = fig.add_subplot(gs[0:3, 9:12])
+#ax1.axis('off')
+ax2 = fig.add_subplot(gs[0:3, 12:15])
+#ax2.axis('off')
+ax3 = fig.add_subplot(gs[3:6, 9:12])
+#ax3.axis('off')
+ax4 = fig.add_subplot(gs[3:6, 12:15])
+#ax4.axis('off')
+
+labels = ['After AO correction, correct piston free basis', 'After AO correction, in-correct piston free basis'  ]
+#plt.figure(figsize=(15,10))
+ax0.loglog(*piston_psd_before_A0,label='before AO correction',color='k',lw=3,linestyle='--')
+for i, psd in enumerate(pistons_psd_after_AO):
+    ax0.loglog(*psd,label='{}'.format( labels[i] ))
+    print(np.sum(psd[1])*np.diff(psd[0])[1])
+    #plt.loglog(psd[0],np.cumsum(psd[1][::-1]*np.diff(psd[0])[1])[::-1])
+ax0.legend(loc='lower left',fontsize=15)
+ax0.tick_params(labelsize=22)
+ax0.set_xlabel('Frequency (Hz)',fontsize=22)
+ax0.set_ylabel(r'Piston PSD $(rad^2/Hz)$',fontsize=22)
+ax0.set_title(r'D={}m, $r_0$={}m, $L_0$=25m, V={}m/s'.format(D,r0,L0,V_w),fontsize=20)
+
+ax1.imshow(pupil_tuples[0][0])
+ax2.imshow(pupil_tuples[0][1])
+ax3.imshow(pupil_tuples[1][0])
+ax4.imshow(pupil_tuples[1][1])
+
+ax1.set_title('True Piston\nBasis',fontsize=15,fontweight="bold")
+ax2.set_title('AO Piston\nBasis',fontsize=15,fontweight="bold")
+ax1.set_ylabel('correct piston\nfree basis',fontsize=15,fontweight="bold")
+ax3.set_ylabel('in-correct piston\nfree basis',fontsize=15,fontweight="bold")
+for axx in [ax1, ax2,ax3,ax4]:
+    axx.set_xticks([])
+    axx.set_yticks([])
+    
+#plt.savefig('/Users/bcourtne/Documents/ANU-PhD/1st_phd_pres_figures/psds_piston_free_basis_def_central_obs.png')
+
+
+
+#%% piston PSD vs correct / incorrect pupil definitions with varying obscuration size
+# -- more complicated case of variying central obscurations 
+
+#basic parameter setup
+col2move = 2
+print('each iteration moves screen by col2move * dfX = {}m'.format(col2move * dfX))
+#master screen
+r0 = 0.1 #m (at 500nm)
+L0 = 25 #m
+wvl = 2.2e-6 #m
+seeing = (0.5/2.2)**(6/5) * 0.98*wvl/r0 * 3600 * 180/np.pi #arcsec (at 500nm)
+dt = 1e-3 
+V_w = col2move * dfX / dt 
+
+## setting up different obscurations to test piston with incorrect pupil def in removal algorithm
+
+#[(real pupil, pupil def)] - keep pupil def as open pupil and the real pupil with different sizes
+"""
+experiment:
+    have a real (1m radius) obscuration, and then play with the
+    AO piston free pupil def with different central obscurations (including open pupil) 
+    #1 of the the piston free pupil definitions should match the real - 
+        we expect this to have the lowest OPD after AO correction
+"""
+real_pupil_mask = pupil_obs_mask.copy()
+#--- for when testing different central obscurations in AO piston definition:
+M2_ratios = [4,8,16,32,64]
+labels = [f'D/{x}' for x in M2_ratios]
+pupil_tuples = [(real_pupil_mask, pupil_m1 - aotools.functions.pupil.circle(radius=int(D_pixel/i), size=D_pixel, circle_centre=(0, 0), origin='middle')) for i in M2_ratios] 
+#---- for simple circle - donut test 
+#pupil_tuples = [(pupil_obs_mask.copy(),  pupil_obs_mask.copy()), (pupil_obs_mask.copy(), pupil_mask.copy())]
+#labels = ['donut','circle'] 
+
+for pp in pupil_tuples:
+    pp[1][pp[1]==0]=np.nan #need to use nan mask
+pupil_definition_dict = {x:y for x,y in zip(labels, pupil_tuples)}
+
+#pupil_definition_dict = dict({'dd':(pupil_obs_mask, pupil_obs_mask),'dc':(pupil_obs_mask,pupil_mask)})
+screens = init_phase_screens(r0,L0,wvl,V_w, dt, D_pixel,pixel_scale=dfX,iterations=1e3)
+# time stamps for the screens
+t = np.arange(0, dt * len(screens), dt)
+no_modes_corrected = 50
+AO_correction_dict = AO_correction(screens, dt, V_w, dfX, no_modes_corrected, D_pixel, pupil_definition_dict )
 
 
 
@@ -315,7 +558,7 @@ for i, psd in enumerate(pistons_psd_after_AO):
         plt.loglog(*psd,label='after DM, DM piston definition has {}m central obscuration'.format( labels[i] ))
     else:
         plt.loglog(*psd,label='after DM, DM piston definition has {}m (true) central obscuration'.format( labels[i] ))
-        
+        #plt.loglog(psd[0],np.cumsum(psd[1][::-1]*np.diff(psd[0])[1])[::-1])
 plt.legend(loc='lower left',fontsize=15)
 plt.gca().tick_params(labelsize=22)
 plt.xlabel('Frequency (Hz)',fontsize=22)
@@ -338,12 +581,22 @@ plt.xlabel(r'$M2_{piston definition}/M2_{real}$',fontsize=15)
 plt.ylabel('increase in OPD (%)',fontsize=15)
 
 
-#%% Fiber coupling 
+fig,ax = plt.subplots(len(pupil_tuples),2,figsize=(4,10))
+for i in range(len(pupil_tuples)):
+    ax[i,0].imshow(pupil_tuples[i][0])
+    ax[i,1].imshow(pupil_tuples[i][1])
+    ax[i,0].axis('off')
+    ax[i,1].axis('off')
+    
+ax[0,0].set_title('True Piston\nBasis',fontsize=15)
+ax[0,1].set_title('AO Piston\nBasis',fontsize=15)
+
+#%% Creating / optimizing fiber mode and apodized pupil
 
 #play with fiber parameters to find reasonable one that is close to diffraction limit 
-for NA in np.logspace(-2,1,10):
+for NA in np.logspace(-2,1,20):
 #for n_core in np.linspace(1,5,10):
-    n_core=2
+    n_core=4 # NA has to be less then n_core (N-clad = sqrt(N_core**2 - NA**2)  )
     a = np.logspace(-9,-5,100)
     waist =  a * (0.65 + 1.619/(2*np.pi*NA*a/wvl)**(3/2) + 2.879/(2*np.pi*NA*a/wvl)**6) # wvl/D
     plt.figure()
@@ -363,64 +616,244 @@ for NA in np.logspace(-2,1,10):
     axx.set_ylabel('V')
 
 #initialize parameters and fiber field array in image plane
-a = 1e-6 #fiber core diameter
-NA = .45 #numerical apperature 
-n_core=2 #refractive index of core
+a = 1.8e-7 # 1e-6 #fiber core diameter
+NA = 3.36 #.45 #numerical apperature 
+n_core = 4 #refractive index of core
 fiber_field_ip = np.nan*np.ones([len(x),len(x)])
 #calculate it
 for i,x_row in enumerate(x):
     #if np.mod(i,100)==0:
     #    print('{}% complete'.format(i/len(x)))
-    fiber_field_ip[i,:] = [fields.gaussian_field(NA=NA,n_core=2.7,a=a,L=wvl,r=np.sqrt(x_row**2 + x_col**2)) for x_col in x]
-#normalization
-fiber_field_ip *= 1/np.sum(fiber_field_ip * dx**2) 
-#go to pupil plane
-fiber_field_pp = sfft.fftshift(sfft.ifft2(fiber_field_ip))
-fiber_field_pp *= 1/np.nansum(fiber_field_pp * dfX**2 )
+    fiber_field_ip[i,:] = [fields.gaussian_field(NA=NA,n_core=n_core, a=a, L=wvl,r=np.sqrt(x_row**2 + x_col**2)) for x_col in x]
+
+#go to pupil plane (its real in the focal plane so reasonable to enforce that its real in pupil also (take abs))
+fiber_field_pp = abs(sfft.fftshift(sfft.ifft2(fiber_field_ip)) )
+#normalization from (Perrin, Woillez 2019) np.nansum(abs(fiber_field_pp)**2 * dfX**2) = 1 
+fiber_field_pp *= 1/abs(np.sqrt(np.nansum(fiber_field_pp)**2 * dfX**2 ))
+
+"""
+Here we do a quick check that fiber coupling gives expected results:
+    eta = 1 for perfect overlap
+    
+input field (fiber_field_pp) must be normalized properly (Perrin, Woillez 2019)
+np.nansum(abs(fiber_field_pp)**2) = 1 
+"""
+
 
 #get the weighted pupil appodized mask with (note its reasonable to assume real/ignore imaginary part)
 pupil_apodized_mask = abs(pupil_obs_mask * crop_big_array(fiber_field_pp , pupil_obs_mask))
 #normalize
-#pupil_apodized_mask *= 1/abs(np.nansum(pupil_apodized_mask*dfX**2))
+pupil_apodized_mask *= 1/abs(np.sqrt(np.nansum(pupil_apodized_mask**2*dfX**2)))
+
+#lets take a look
+plt.figure()
+plt.imshow(pupil_apodized_mask)
+
+### --------- Plot showing fiber parameters and fiber field in pupil 
+
+fig = plt.figure(tight_layout=True,figsize=(16,6))
+gs = gridspec.GridSpec(10, 15)
+
+ax0 = fig.add_subplot(gs[:, :10])
+ax1 = fig.add_subplot(gs[2:7, 11:14])
+#ax1.axis('off')
+
+aaa = np.logspace(-9,-5,100)
+a_real = a #selected fiber core diameter
+waist =  aaa * (0.65 + 1.619/(2*np.pi*NA*aaa/wvl)**(3/2) + 2.879/(2*np.pi*NA*aaa/wvl)**6) # wvl/D
+plt.figure()
+
+ax0.loglog(aaa, waist,color='k')
+ax0.axhline(wvl/D,color='k',linestyle='--',lw=3,label=r'$\lambda$/D')
+ax0.axvline(a,color='k',linestyle='-.',lw=3,label='selected fiber diameter')
+ax0.legend(fontsize=20)
+ax0.set_xlabel('Fiber core diameter (m)',fontsize=20)
+ax0.set_ylabel('Gaussian waist (m)',fontsize=20)
+ax0.set_title(f'NA={NA}')
+ax0.tick_params(labelsize=20)
+#ax0.set_ylim([1e-9,1e1])
+
+axx = ax0.twinx()    
+#V = 2*np.pi*NA*a/wvl , single mode cut-off at 2.4
+axx.semilogx(aaa, 2*np.pi*NA*aaa/wvl, color='green')
+axx.axhline(2.4, linestyle='--', color='green')
+axx.axhspan(0, 2.4, facecolor='green', alpha=0.2,label='single mode regime')
+axx.legend(loc='lower left',fontsize=20)
+axx.set_ylabel('V number',fontsize=20)
+axx.yaxis.label.set_color('green')
+axx.set_ylim([0,15])
+axx.tick_params(labelsize=20)
+axx.tick_params(axis='y', colors='green')
+
+
+ax1.imshow(pupil_apodized_mask)
+ax1.axis('off')
+ax1.set_title('Fiber Apodised\nPupil',fontsize=20 )
+
+#fig.savefig('/Users/bcourtne/Documents/ANU-PhD/1st_phd_pres_figures/optimzing_fiber_coupling.png')    
+
+#%% Experiment with fiber coupling and different AO piston free definitions 
 
 #remember tuple order (real telescope pupil, pupil definition applied in piston removal)
-pupil_definition_dict4fiber = dict({'correct':(pupil_obs_mask, pupil_apodized_mask),\
-                     'incorrect_1':(pupil_obs_mask, pupil_obs_mask),
-                     'incorrect_2':(pupil_obs_mask, pupil_mask)})
+
+    
+"""    Original - ithink what we want one  """
+pupil_definition_dict4fiber = dict({'correct':(pupil_apodized_mask, pupil_apodized_mask),\
+                     'incorrect':(pupil_apodized_mask, pupil_obs_mask)})
     
 #labels4fiber = list(pupil_definition_dict.keys())
 
 #A0 correction
-AO_correction_dict4fiber = AO_correction(screens, dt, no_modes_corrected, D_pixel, pupil_definition_dict4fiber  )
-#piston time series after AO 
-pistons_ts_after_A0_4fiber = [[ np.nanmean(p) for p in AO_correction_dict4fiber[x]['residual_screen'] ] for x in AO_correction_dict4fiber.keys()]
+AO_correction_dict4fiber = AO_correction(screens,dt, V_w, dfX, no_modes_corrected, D_pixel, pupil_definition_dict4fiber  )
+
 #fiber coupling 
-coupled_fields = [fiber_coupling(pupil_apodized_mask, AO_correction_dict4fiber[x]['residual_screen'] , dfX) for x in AO_correction_dict4fiber.keys()]
+coupled_fields = [[ np.nansum(np.exp(-1j*p) * pupil_apodized_mask * dfX**2 ) for p in AO_correction_dict4fiber[x]['residual_screen'] ] for x in AO_correction_dict4fiber.keys()]
 
-#fiber coupled piston (phase)
-coupled_phase = [np.unwrap(np.angle(np.array(f))) for f in coupled_fields]
+#piston
+coupled_phase = [np.unwrap(np.angle(f)) for f in coupled_fields]
 
-#PSD of coupled phase
+#efficiency 
+coupled_efficiency = [[ abs(np.nansum(np.exp(-1j*p) * pupil_apodized_mask * dfX**2 ))**2 /\
+                       ( np.nansum(abs(np.exp(1j*p))**2 * dfX**2) * \
+                        np.nansum(abs(pupil_apodized_mask)**2 * dfX**2)) \
+                           for p in AO_correction_dict4fiber[x]['residual_screen'] ] for x in AO_correction_dict4fiber.keys()]
+
+    
+#CHECK
+print('check this {}=1'.format(abs(np.nansum(pupil_apodized_mask**2 * dfX**2 ))**2 /\
+                       ( np.nansum(abs(pupil_apodized_mask)**2 * dfX**2) * \
+                        np.nansum(abs(pupil_apodized_mask)**2 * dfX**2))   ) )
+    
+#PSD
 coupled_psds = [sig.welch(p, fs=1/dt , nperseg=2**9, window='hann',detrend='linear') for p in coupled_phase]
 
 
-#plotting
-plt.figure(figsize=(8,5))
-plt.loglog(*coupled_psds[0],label='correct')
-plt.loglog(*coupled_psds[1],label='incorrect 1')
-plt.loglog(*coupled_psds[2],label='incorrect 2')
-plt.loglog(coupled_psds[0][0],coupled_psds[0][0]**(-8/3),label=r'$f^{-8/3}$',color='k',linestyle=':')
-plt.loglog(coupled_psds[0][0],coupled_psds[0][0]**(-17/3),label=r'$f^{-17/3}$',color='k',linestyle='--')
-plt.legend(loc='lower left',fontsize=15)
-plt.gca().tick_params(labelsize=22)
-plt.xlabel('Frequency (Hz)',fontsize=22)
-plt.ylabel(r'Piston PSD $(rad^2/Hz)$',fontsize=22)
-plt.title(r'D={}m, $r_0$={}m, $L_0$=25m, V={}m/s'.format(D,r0,L0,V_w),fontsize=20)
+fig = plt.figure(tight_layout=True,figsize=(16,6))
+gs = gridspec.GridSpec(6, 16)
+
+ax0 = fig.add_subplot(gs[:, :8])
+ax1 = fig.add_subplot(gs[0:3, 9:12])
+#ax1.axis('off')
+ax2 = fig.add_subplot(gs[0:3, 12:15])
+#ax2.axis('off')
+ax3 = fig.add_subplot(gs[3:6, 9:12])
+#ax3.axis('off')
+ax4 = fig.add_subplot(gs[3:6, 12:15])
+#ax4.axis('off')
+
+ax0.loglog(*piston_psd_before_A0,label='orginal atmospheric piston')
+ax0.loglog(*coupled_psds[0],label='fiber coupled piston w apodised piston free basis')
+ax0.loglog(*coupled_psds[1],label='fiber coupled piston w/o apodised piston free basis')
+ax0.loglog(coupled_psds[0][0],1e3*coupled_psds[0][0]**(-8/3),label=r'$f^{-8/3}$',color='k',linestyle=':')
+ax0.loglog(coupled_psds[0][0],1e3*coupled_psds[0][0]**(-17/3),label=r'$f^{-17/3}$',color='k',linestyle='--')
+ax0.legend(loc='lower left',fontsize=15)
+ax0.tick_params(labelsize=22)
+ax0.set_xlabel('Frequency (Hz)',fontsize=22)
+ax0.set_ylabel(r'Piston PSD $(rad^2/Hz)$',fontsize=22)
+ax0.set_title(r'D={}m, $r_0$={}m, $L_0$=25m, V={}m/s'.format(D,r0,L0,V_w),fontsize=20)
 
 
+ax1.imshow(pupil_definition_dict4fiber['correct'][0])
+ax2.imshow(pupil_definition_dict4fiber['correct'][1])
+ax3.imshow(pupil_definition_dict4fiber['incorrect'][0])
+ax4.imshow(pupil_definition_dict4fiber['incorrect'][1])
+
+ax1.set_title('Apodised Pupil',fontsize=15,fontweight="bold")
+ax2.set_title('AO Piston\nBasis',fontsize=15,fontweight="bold")
+#ax1.set_ylabel('correct piston\nfree basis',fontsize=15,fontweight="bold")
+#ax3.set_ylabel('in-correct piston\nfree basis',fontsize=15,fontweight="bold")
+for axx in [ax1, ax2,ax3,ax4]:
+    axx.set_xticks([])
+    axx.set_yticks([])
+
+#plt.savefig('/Users/bcourtne/Documents/ANU-PhD/1st_phd_pres_figures/psds_piston_free_basis_def_fiber_coupling.png')    
 
 
 #%%
+"""
+
+
+
+                IGNORE BELOW HERE 
+
+
+"""
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#%% Just doing simple average of each zernike mode across different pupils
+
+#normalize pupil mask <P|P> = 1 
+pupil_mask_norm = pupil_mask/np.nansum(pupil_mask * pupil_mask)
+#normalize pupil mask <P|P> = 1 
+pupil_obs_mask_norm = pupil_obs_mask/np.nansum(pupil_obs_mask * pupil_obs_mask )
+#includes piston, and apply nan mask to zernikes  
+zernikes = [pupil_mask * aotools.functions.zernike.zernike_noll(m+2,int(D_pixel)) for m in range(200)]
+
+apodized_zernikes = [pupil_mask * crop_big_array(fiber_field_pp,pupil_mask) * aotools.functions.zernike.zernike_noll(m+2,int(D_pixel)) for m in range(200)]
+
+plt.plot(range(2,len(zernikes)+2,1),[np.nansum(pupil_mask_norm * zzz) for zzz in zernikes],label='circular pupil')
+plt.plot(range(2,len(zernikes)+2,1),[np.nansum(pupil_obs_mask_norm * zzz) for zzz in zernikes],label='donut pupil')
+plt.plot(range(2,len(zernikes)+2,1),[np.nansum(pupil_mask_norm * zzz) for zzz in apodized_zernikes],label='apodized circular pupil')
+plt.plot(range(2,len(zernikes)+2,1),[np.nansum(pupil_obs_mask_norm * zzz) for zzz in apodized_zernikes],label='apodized donut pupil')
+
+plt.legend()
+plt.xlabel('Noll index')
+plt.ylabel('piston (normalized)')
+
+#show in overlap integral that piston term comes out as constant...d
+
+#then take some non-zero coefficient of zernike coupling to piston and plot scaled zernike PSD vs piston 
+
+
+
+#motivation for piston free definition in AO... Can this be corrected
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#%%  
 
 
 #pupil = aotools.functions.pupil.circle(radius=D_pixel/2, size=D_pixel, circle_centre=(0, 0), origin='middle')
@@ -443,6 +876,7 @@ for i in range(int(2e3)):
 # calculate piston (with standard )
 screen_piston = [np.nanmean(screens[i]*pupil_mask) for i in range(len(screens))]
 screen_obs_piston = [np.nanmean(screens[i]*pupil_obs_mask) for i in range(len(screens))]
+
 
 #define the time stamps, note that sampling rate effectively determines wind speed parameter 
 dt = 1e-3 
@@ -1016,22 +1450,77 @@ plt.text(4e1,1e-9,r'$\tau_0$={}ms, $L_0$={}m'.format(1e3*tau0, L0))
 #%%
 
 
+def fiber_coupling_eta(pupil_mask, fiber_field_pupil, screens , dfX):
+    """
+    calculate eta from Perrin & Woillez 2019 
+    ASSUMES fiber field and screens do not have pupil mask applied. the mask is specified here!!!!
+    
+    Parameters
+    ----------
+    fiber_field_in_pupil : array
+        DESCRIPTION.  fiber field in pupil, does not assume the pupil mask has been applied
+    pupil_mask : TYPE
+        DESCRIPTION. - APODIZED WEIGHTED PUPIL MASK
+    screens : List 
+        DESCRIPTION. list of phase screens (should be multiplied by pupil)
+    dfX : TYPE
+        DESCRIPTION.
 
-fig = plt.figure()
-ax = plt.axes(projection='3d')
-ax.contour3D(fXX,fYY, z_i, 50, cmap='binary')
+    Returns
+    -------
+    None.
 
-"""
-And I can just think about the (normalized) pupil apodization (A) as weighting 
-the phase (i.e. how many photons from that position/phase in the pupil are seen 
-by the fiber) for the piston free basis Z_0 . i.e. apodized piston calculation 
-for some zernike Z_i  : Z_0" = <A * Z_0 | Z_i >  
+    """
+    
+    #Do I normalize pupil mask? 
+    #pupil_mask =  pupil_mask * 1/np.nansum(pupil_mask * dfX**2) # np.zeros(pupil_mask.shape) #*= 10000 #1/np.nansum(pupil_mask * dfX**2)
+    
+    eta = []
+    
+    #applying the pupil mask to fiber field in the pupil
+    if fiber_field_pupil.shape[0] > pupil_mask.shape[0]: #if need to crop fiber field to fit pupil mask
+        print( 'WARNING: cropping fiber field to fit pupil mask' )
+        fiber_field_pupil = crop_big_array(fiber_field_pupil,pupil_mask)
+    
+    elif fiber_field_pupil.shape[0] < pupil_mask.shape[0]: 
+        print( 'WARNING: cropping pupil_mask to fit fiber field' )
+        fiber_field_pupil = crop_big_array(pupil_mask,fiber_field_pupil)
+        
+        
+    #should also check if screens match the mask before applying the mask
+    #if screens[0].shape[0] == pupil_mask.shape[0]:
+    #    #screens = [  screens[i] for i in range(len(screens))]  
+        
+    if screens[0].shape[0] > pupil_mask.shape[0]:
+        print( 'WARNING: cropping phase screens to fit pupil mask' )
+        screens = [ crop_big_array(screens[i],pupil_mask) for i in range(len(screens))]
+        
+    elif screens[0].shape[0] < pupil_mask.shape[0]:
+        raise TypeError('the shape of the phase screen arrays are smaller than the pupil mask')
+        
+    # do overlap integral for fiber coupling each screen
+    for screen in screens: 
+        
+        
+        #tel_field = np.exp(1j * np.angle(fiber_field_pp) )
+        #tel_field *= 1/(np.nansum(tel_field)**2 * dfX**2)
 
-"""
-
-# VLT pupil with/without central obscuration
-
-# fibre field in focal plane 
-
-
-# fibre field in pupil plane 
+        # NOTE FROM PERRIN WOILLEZ 2019 they dont take square in overlap integral ...  I cant get eta = 1 without this 
+        eta.append( np.nansum((pupil_mask * fiber_field_pupil * np.exp(-1j*screen))**2 * dfX**2) )
+    
+    """    
+    if screens[0].shape[0] > pupil_mask.shape[0]: #if need to crop fiber field to fit pupil mask
+        print( 'WARNING: cropping fiber field to fit pupil mask' )
+        for screen in screens: 
+            coupled_field.append( np.nansum(np.exp(-1j*fiber_field_pupil) * np.exp(1j*crop_big_array(screen,pupil_mask)) * dfX**2) )
+    
+    elif screens[0].shape[0] == pupil_mask.shape[0]: #no cropping needed
+        for screen in screens:
+            coupled_field.append( np.nansum(np.exp(-1j*fiber_field_pupil) * np.exp(1j*screen) * dfX**2) )
+   
+    else:
+        raise TypeError('pupil mask array is bigger than fiber field array in pupil')
+    """
+    
+    return(np.array(eta))
+    
