@@ -17,7 +17,7 @@ from astropy.coordinates import EarthLocation
 from astropy.time import Time
 from astropy import units as u
 from astropy.coordinates import SkyCoord
-
+from scipy import special 
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 #%% 1 ----------- #constants ------------------
@@ -147,10 +147,10 @@ def baseline2uv_matrix(wvl, datetime, location , telescope_coordinates):
 def B_L(wvl,T): #Spectral density as function of temperature
     #wvl is wavelength vector to calculate spectral density at
     #T is temperature of the black body 
-    Bb=2*h*c**2/wvl**5 * 1 / (np.exp(h*c/(wvl*kB*T)) - 1)
+    Bb = 2*h*c**2/wvl**5 * 1 / (np.exp(h*c/(wvl*kB*T)) - 1)
     return(Bb)
  
-    
+"""    
 def create_black_body_sphere(T, wvl,Rp, r_array, center):
     # creates black body sphere at temperature T and wvl with radius Rp at center coordinates 
     # and grid defined by r_array
@@ -165,8 +165,93 @@ def create_black_body_sphere(T, wvl,Rp, r_array, center):
                 
                 I_grid[i,j] = B_L(wvl, T)
                 
-    return(I_grid)
+    return(I_grid)"""
     
+
+
+def create_black_body_sphere(T, wvl,Rp, pixScale):
+    # creates black body sphere at temperature T and wvl with radius Rp at center coordinates 
+    # Rp in au 
+    # pixscale pix/au
+    
+        
+    x = np.linspace(-Rp, Rp,  int( 2 * np.ceil( 2 * pixScale * Rp  / 2.) ) )  #aways round to even number (easier to insert to other arrays)
+    I_grid = np.zeros([len(x),len(x)]) 
+    for i, xx in enumerate(x):
+        for j,yy in enumerate(x):
+            if xx**2 + yy**2 <= Rp**2: 
+                
+                I_grid[i,j] = B_L(wvl, T)
+                
+    return(I_grid)
+
+
+
+def add_in_star(I1, I2, c1, c2, big_grid, pixScale, I2_eclipse_I1 = True):
+    # pixScale in I1, I2 must be equal  (pixel/au)
+    # c1, c2, c_grid are in au 
+    #I1_eclipse_I2  = True if I1 is infront of I2
+    
+    # ---- FUNCTION 2 
+    # - take 2 stars, respective center positions (au), and big grid to place into
+    # - putting stars together 
+    #     if r1+r2 < |c1 - c2| 
+    #       just place into grid
+    #     else:
+    #       make temporary grid of r1 + r2 + |c1 - c2|, keeping physical 0 point at c1
+    #       place each star into seperate grid.. keeping track of centers
+    #       function to eclipse in overlapping pixels 
+    # 
+    
+    r1, r2 =  0.5 * I1.shape[0] / pixScale ,  0.5 * I2.shape[0] / pixScale 
+    # 
+    c_dif = np.array(list(c1)) - np.array(list(c2))
+    c_dist = np.sqrt( c_dif @  c_dif )
+    
+    #make number of pixels just big enough
+    NN = big_grid.shape[0]
+    
+    phys_size = NN / pixScale #pixScale = pix/au
+        
+    x = np.linspace(-phys_size/2, phys_size/2, NN) 
+        
+    i1, j1 = np.argmin(abs(x-c1[0])) , np.argmin(abs(x-c1[1]))
+    
+    i2, j2 = np.argmin(abs(x-c2[0])) , np.argmin(abs(x-c2[1]))
+    
+    N1 = I1.shape[0]
+    
+    N2 = I2.shape[0]
+    
+        
+    if r1 + r2 < c_dist: 
+      
+        G = big_grid.copy()
+        # put stars in grid
+        G[i1-N1//2 : i1+N1//2, j1-N1//2 : j1+N1//2] = I1
+        
+        G[i2-N2//2 : i2+N2//2, j2-N2//2 : j2+N2//2] = I2
+    
+    else: #overlapping stars.. need to deal with eclipse
+        
+        #make 2 copies of the grid
+        G1, G2 = big_grid.copy(), big_grid.copy()
+        
+        # put stars in seperate grids
+        G1[i1-N1//2 : i1+N1//2, j1-N1//2 : j1+N1//2] = I1
+        
+        G2[i2-N2//2 : i2+N2//2, j2-N2//2 : j2+N2//2] = I2
+        
+        if I2_eclipse_I1:
+            
+            G = eclipse_adding(G2, G1)
+            
+        else:
+            
+            G = eclipse_adding(G1, G2)
+    
+    return(G)
+
 
 def eclipse_adding(I1, I2):
     # adding stellar intensity arrays when one star eclipses the other
@@ -179,7 +264,7 @@ def eclipse_adding(I1, I2):
         i2 = I2.reshape(-1)        
         #indices where I1 intersects I2 (these points we assign I1 )
         eclipsing_indx = set(np.where( i1 > 0 )[0]).intersection(set(np.where( i2 > 0 )[0]))
-        non_eclipsing_indx = set(range(i1.shape[0])) - eclipsing_indx
+        #non_eclipsing_indx = set(range(i1.shape[0])) - eclipsing_indx
         
         if eclipsing_indx: #if the star is actually eclipsing
         
@@ -198,42 +283,244 @@ def eclipse_adding(I1, I2):
     
     return(I3)
     
+
+
+#%% 4  ----------- #Example ------------------   
+
+# function that accepts obs_dict with telescope and observational parameters and target dictionary  
+"""
+
+# target dictionary has keys
+    stellar grid , 
+    list of (radii,centers),
+    list of wavelengths 
+
+# obs dictionary has keys 
+    time of obs
+    tel location
+    tel array 
+
+# returns
+    UV sampling 
+    returns visibilities map (2D array)
+    visibilities at telescope array sampling points 
+    
+"""
+
+targ_dict = dict( { 'grid' :[] , 'pixScale':[], 'star_geometry':[(),(),(),()], star_coord : (), 'wvl':[1.1e-6, 2.2e-6] } )
+obs_dict = dict( { 'obs_time':[] , 'tel_loc' : paranal_coordinate, 'tel_array': []  }) 
+
+
+def observe(targ_dict, obs_dict):
+    
+    for wvl in targ_dict['wvl']: 
+        
+        for center, in targ_dict['star_geometry']:
+            
+            print('to do')            
+    
+    
+#%%
+my_vis_dict = dict() # to store (baseline, vis) for each wvl, companion position 
+my_ima_dict = dict()
+wvls = [1.1e-6, 2.2e-6]
+phis = [-1.2, 0.5, 0, 1.2]
+for wvl, colour in zip(wvls, ['black','red']):
+    
+    my_vis_dict[wvl] = dict()
+    
+    for xxx in phis: # transient across parent star:
+        # == CREATE TARGET GEOMETRY == 
+        
+        #fundemental stellar parameters
+        #primary_dist = 4.125e+7 #200pc in au
+        #secondary_dist = 4.125e+7 #200pc in au
+        
+        
+        stellar_dist  =  4.125e+7 #200pc in au
+        
+        Rc = 1  #0.000477895 #[au] ( 1 R_j in au (note brown dwarf radius ~ 1 R_juptier (Hatzes & Rauer, 2015)  )
+        Rp = 4 * Rc #[au] ( x10 the suns radius (note that 10 R_J ~ 1 R_sun )
+        
+        
+        cp, cc = (0,0),  (0, xxx*Rp) #stellar centers (au) 
+        
+        c_dif = np.array(list(cp)) - np.array(list(cc))
+        c_dist = np.sqrt( c_dif @  c_dif )
+        
+        # force a reasonable limit on the grid
+        grid_limit = 3 * max( c_dist, Rp ) #au (x2 the maximum of either distance between stars or parent radius)
+        No_sample_across_Rc = 20
+        # radius grid should have sufficient sampling across companion  (so resembles not too pixelated circle)
+        #   dr = grid_limit / N .. No_sample_across_Rc samples across companion radius => Rc/dr = No_sample_across_Rc 
+        # => Rc/grid_limit * N = No_sample_across_Rc => N = No_sample_across_Rc/Rc * grid_limit
+        
+        N = int( No_sample_across_Rc/Rc * grid_limit )  #number of samples along row in grid
+        r_au = np.linspace( -grid_limit , grid_limit , N )   # au  - grid size
+        
+        pixScale = 1/(np.diff( r_au )[0])  #pixel/au
+        
+        #center_p = (0, 0)  # au
+        #center_c = (1, 0)  # au
+                 
+        Tp = 3400 #K
+        Tc = 1000 #K 
+        
+        Ip = create_black_body_sphere(Tp, wvl, Rp, pixScale)
+        Ic = create_black_body_sphere(Tc, wvl, Rc, pixScale)
+        
+        big_grid = np.zeros([N,N])
+        
+        #I3 = add_in_star(I1, I2, c1, c2, big_grid, pixScale, I1_eclipse_I2 = True)
+        
+        I3 = add_in_star(Ip, Ic, cp, cc, big_grid, pixScale, I2_eclipse_I1 = True)
+
+        my_ima_dict[xxx] = I3
+        
+        # == SET UP OBSERVATION PARAMETERS ==
+        #  -- where are we sampling in UV plane?\
+            
+        #Target
+        targ_coord = SkyCoord(ra=225*u.degree, dec=-10*u.degree, frame='icrs')
+        
+        #Time 
+        t = Time('2020-08-01T05:02:00', scale='utc', location=paranal_coordinate)
+        
+        #UTs
+        stations_list = ['U1','U2','U3','U4']  
+        
+        #x,y baseline vectors (m)
+        B = tel2baseline(stations_list) #(m)
+        
+        #physical baseline distances (not projected on target location)
+        B_scalar = np.sum( B * B, axis=1)**0.5   
+        
+        #matrix for baseline vectors to UV conversion
+        B2UV = baseline2uv_matrix( wvl, t, paranal_coordinate, targ_coord )
+          
+        #our UV coordinates
+        Usamp, Vsamp = B2UV[:2,:2] @ B.T
+        
+        
+        
+        """#lets take a look
+        plt.figure()
+        plt.plot(*(UV*wvl),'o',color='k')"""
+        
+        
+        # == PUT OBJECT IN UV PLANE (FOURIER TRANSFORM) == 
+        
+        #ucoord,vcoord = 1/r_grid, 1/r_grid
+        vis = np.fft.fftshift( np.fft.fft2( I3 )  )
+        ucoord = np.fft.fftshift( np.fft.fftfreq(I3.shape[1],  np.diff(r_au/stellar_dist)[0]) ) # sampling in radians r_au/stellar_dist
+        
+        
+        #lets take a look at what |V| we're sampling in the UV plane with VLTI! 
+        """
+        fig = plt.figure()
+        im = plt.pcolormesh(wvl*ucoord, wvl*ucoord, abs(vis))
+        plt.plot(Usamp*wvl, Vsamp*wvl,'x',color='k',label='VLTI sampling')
+        plt.xlabel('U (m)',fontsize=15)
+        plt.ylabel('V (m)',fontsize=15)   
+        plt.xlim([-130,130])
+        plt.ylim([-130,130])
+        divider = make_axes_locatable(plt.gca())
+        cax = divider.append_axes('top', size='5%', pad=0.05)
+        plt.colorbar(im, cax=cax, orientation='horizontal')
+        cax.set_xlabel('|V|',fontsize=15)
+        
+        cax.xaxis.set_label_position('top') 
+        cax.xaxis.set_ticks_position('top')
+        """
+        
+        # == get V at VLTI u,v points ==
+        
+        #just do nearest neighbour interp (should be fine with good image sampling)
+        U_indx = [np.argmin(abs(ucoord - sss)) for sss in Usamp]  
+        V_indx = [np.argmin(abs(ucoord - sss)) for sss in Vsamp]  
+        
+        B_samp = wvl * np.array( [(ucoord[i]**2 + ucoord[j]**2)**0.5 for i,j in zip(U_indx, V_indx) ] )
+        vis_samp = np.array([vis[i,j] for i,j in zip(U_indx, V_indx)], dtype='complex')
+        
+        #B_samp 
+        plt.plot( B_scalar , abs(vis_samp)**2,'.',label='wvl = {}, companion pos = {}'.format(wvl, xxx),color=colour)
+        
+        my_vis_dict[wvl][xxx] = (B_samp, vis_samp)        
+        
+plt.legend()
+
+
+fig, ax = plt.subplots(3,len(phis),sharex=False,figsize=(16,16))
+wvl = wvls[0]
+for i, phi in enumerate(phis): 
+    ax[0,i].plot( B_scalar , abs(my_vis_dict[wvl][phi][1] )**2,'o',label=phi)
+    ax[1,i].plot( B_scalar , np.angle(my_vis_dict[wvl][phi][1] ),'o',label=phi)
+    ax[2,i].imshow(np.log10(my_ima_dict[phi]))
+plt.legend()
+
+
+plt.figure()
+
 #%% 3 ----------- #Example ------------------     
 
 
 # == CREATE TARGET GEOMETRY == 
 
 #fundemental stellar parameters
-primary_dist = 1e21 * 6.68459e-14 #au
-secondary_dist = 1e21 * 6.68459e-14 #au
+#primary_dist = 4.125e+7 #200pc in au
+#secondary_dist = 4.125e+7 #200pc in au
 
-secondary_rad = 0.000477895 #1 R_j in au (note brown dwarf radius ~ 1 R_juptier (Hatzes & Rauer, 2015)  )
-primary_rad = 1e2 * secondary_rad # x10 the suns radius (note that 10 R_J ~ 1 R_sun )
 
-N = 1000 #number of samples along row in grid
-Rp = primary_rad/primary_dist #rad
-Rc = secondary_rad/secondary_dist #rad
-r_grid = np.linspace( -5*Rp, 5*Rp, N )
+stellar_dist  =  4.125e+7 #200pc in au
 
-center_p = (0,0)  # in radians
-center_c = (r_grid[r_grid.shape[0]//2 + 5],0)  #
+Rc = 1  #0.000477895 #[au] ( 1 R_j in au (note brown dwarf radius ~ 1 R_juptier (Hatzes & Rauer, 2015)  )
+Rp = 4 * Rc #[au] ( x10 the suns radius (note that 10 R_J ~ 1 R_sun )
+
+
+cp, cc = (0,0),  (0, 0.5*Rp) #stellar centers (au) 
+
+c_dif = np.array(list(cp)) - np.array(list(cc))
+c_dist = np.sqrt( c_dif @  c_dif )
+
+# force a reasonable limit on the grid
+grid_limit = 3 * max( c_dist, Rp ) #au (x2 the maximum of either distance between stars or parent radius)
+No_sample_across_Rc = 20
+# radius grid should have sufficient sampling across companion  (so resembles not too pixelated circle)
+#   dr = grid_limit / N .. No_sample_across_Rc samples across companion radius => Rc/dr = No_sample_across_Rc 
+# => Rc/grid_limit * N = No_sample_across_Rc => N = No_sample_across_Rc/Rc * grid_limit
+
+N = int( No_sample_across_Rc/Rc * grid_limit )  # number of samples along row in grid
+r_au = np.linspace( -grid_limit , grid_limit , N )   # au  - grid size
+
+pixScale = 1/(np.diff( r_au )[0])  #pixel/au
+
+#center_p = (0, 0)  # au
+#center_c = (1, 0)  # au
+
+wvl = 2e-6 #um
          
 Tp = 3400 #K
 Tc = 1000 #K 
 
-I1 = create_black_body_sphere(Tp, 2.2e-6, Rp, r_grid, center_p)
-I2 = create_black_body_sphere(Tc, 2.2e-6, Rc, r_grid, center_c)
+Ip = create_black_body_sphere(Tp, wvl, Rp, pixScale)
+Ic = create_black_body_sphere(Tc, wvl, Rc, pixScale)
 
-I3 = eclipse_adding(I2, I1)
+big_grid = np.zeros([N,N])
+
+#I3 = add_in_star(I1, I2, c1, c2, big_grid, pixScale, I1_eclipse_I2 = True)
+
+I3 = add_in_star(Ip, Ic, cp, cc, big_grid, pixScale, I2_eclipse_I1 = True)
 
 #lets take a look
 plt.figure()
-plt.pcolormesh(rad2mas * r_grid, rad2mas * r_grid, I3)
-plt.xlabel('radius (mas)',fontsize=15)
-plt.ylabel('radius (mas)',fontsize=15)
+plt.pcolormesh(r_au, r_au, I3)
+plt.xlabel('radius (au)',fontsize=15)
+plt.ylabel('radius (au)',fontsize=15)
 plt.gca().tick_params(labelsize=15)
 plt.tight_layout()
 plt.gca().set_aspect('equal')
+
+
 
 
 
@@ -248,9 +535,6 @@ t = Time('2020-08-01T05:02:00', scale='utc', location=paranal_coordinate)
 
 #UTs
 stations_list = ['U1','U2','U3','U4']  
-
-#wavelength 
-wvl = 1e-6 #um
 
 #x,y baseline vectors (m)
 B = tel2baseline(stations_list) #(m)
@@ -274,12 +558,13 @@ plt.plot(*(UV*wvl),'o',color='k')"""
 # == PUT OBJECT IN UV PLANE (FOURIER TRANSFORM) == 
 
 #ucoord,vcoord = 1/r_grid, 1/r_grid
-vis = np.fft.fft2( I3 ) 
-ucoord = np.fft.fftshift( np.fft.fftfreq(I3.shape[1], np.diff(r_grid)[0]) )
+vis = np.fft.fftshift( np.fft.fft2( I3 )  )
+ucoord = np.fft.fftshift( np.fft.fftfreq(I3.shape[1],  np.diff(r_au/stellar_dist)[0]) ) # sampling in radians r_au/stellar_dist
+
 
 #lets take a look at what |V| we're sampling in the UV plane with VLTI! 
 fig = plt.figure()
-im = plt.pcolormesh(wvl*ucoord, wvl*ucoord, abs(np.fft.fftshift(vis)))
+im = plt.pcolormesh(wvl*ucoord, wvl*ucoord, abs(vis))
 plt.plot(Usamp*wvl, Vsamp*wvl,'x',color='k',label='VLTI sampling')
 plt.xlabel('U (m)',fontsize=15)
 plt.ylabel('V (m)',fontsize=15)   
@@ -302,9 +587,182 @@ V_indx = [np.argmin(abs(ucoord - sss)) for sss in Vsamp]
 
 B_samp = wvl * np.array( [(ucoord[i]**2 + ucoord[j]**2)**0.5 for i,j in zip(U_indx, V_indx) ] )
 vis_samp = np.array([vis[i,j] for i,j in zip(U_indx, V_indx)], dtype='complex')
+plt.figure()
+plt.plot( B_samp , abs(vis_samp),'.')
 
-plt.plot( np.sort(B_scalar), vis_samp)
 
+
+
+
+
+
+#%% checking theory disk matches algorithm disk (make sure binary companion isnt in the vis_samp)
+
+
+
+stellar_dist  =  4.125e+7 #200pc in au
+
+Rc = 1  #0.000477895 #[au] ( 1 R_j in au (note brown dwarf radius ~ 1 R_juptier (Hatzes & Rauer, 2015)  )
+Rp = 4 * Rc #[au] ( x10 the suns radius (note that 10 R_J ~ 1 R_sun )
+
+
+cp, cc = (0,0),  (0, 0.5*Rp) #stellar centers (au) 
+
+c_dif = np.array(list(cp)) - np.array(list(cc))
+c_dist = np.sqrt( c_dif @  c_dif )
+
+# force a reasonable limit on the grid
+grid_limit = 10 * max( c_dist, Rp ) #au (x2 the maximum of either distance between stars or parent radius)
+No_sample_across_Rc = 40
+# radius grid should have sufficient sampling across companion  (so resembles not too pixelated circle)
+#   dr = grid_limit / N .. No_sample_across_Rc samples across companion radius => Rc/dr = No_sample_across_Rc 
+# => Rc/grid_limit * N = No_sample_across_Rc => N = No_sample_across_Rc/Rc * grid_limit
+
+N = int( No_sample_across_Rc/Rc * grid_limit )  #number of samples along row in grid
+r_au = np.linspace( -grid_limit , grid_limit , N )   # au  - grid size
+
+pixScale = 1 / ( np.diff( r_au )[0] )  #pixel/au
+
+#center_p = (0, 0)  # au
+#center_c = (1, 0)  # au
+
+wvl = 2e-6 #um
+         
+Tp = 3400 #K
+Tc = 1000 #K 
+
+Ip = create_black_body_sphere(Tp, wvl, Rp, pixScale)
+#Ic = create_black_body_sphere(Tc, wvl, Rc, pixScale)
+
+big_grid = np.zeros([N,N])
+
+I3 = add_in_star(Ip, Ip, cp, cp, big_grid, pixScale, I2_eclipse_I1 = True)
+
+# == SET UP OBSERVATION PARAMETERS ==
+#  -- where are we sampling in UV plane?\
+    
+#Target
+targ_coord = SkyCoord(ra=225*u.degree, dec=-10*u.degree, frame='icrs')
+
+#Time 
+t = Time('2020-08-01T05:02:00', scale='utc', location=paranal_coordinate)
+
+#UTs
+stations_list = ['U1','U2','U3','U4']  
+
+#x,y baseline vectors (m)
+B = tel2baseline(stations_list) #(m)
+
+#physical baseline distances (not projected on target location)
+B_scalar = np.sum( B * B, axis=1)**0.5   
+
+#matrix for baseline vectors to UV conversion
+B2UV = baseline2uv_matrix( wvl, t, paranal_coordinate, targ_coord )
+  
+#our UV coordinates
+Usamp, Vsamp = B2UV[:2,:2] @ B.T
+
+#look at samples in UV plane
+plt.pcolormesh(ucoord[700:900],ucoord[700:900], abs(vis)[700:900,700:900])
+plt.plot(Usamp,Vsamp,'x',color='w')
+
+
+"""#lets take a look
+plt.figure()
+plt.plot(*(UV*wvl),'o',color='k')"""
+
+
+# == PUT OBJECT IN UV PLANE (FOURIER TRANSFORM) == 
+
+#ucoord,vcoord = 1/r_grid, 1/r_grid
+vis = np.fft.fftshift( np.fft.fft2( I3 )  )
+ucoord = np.fft.fftshift( np.fft.fftfreq(I3.shape[1],  np.diff( r_au/stellar_dist )[0]) ) # sampling in radians r_au/stellar_dist
+
+
+#check cut of visibility map matches disk visibility
+DDD =  2 * Rp/stellar_dist
+
+plt.figure()
+#theory
+V_disk =  np.array( [(2*special.j1(np.pi * DDD * b / wvl) / (np.pi * DDD * b /wvl) ) for b in (wvl * ucoord[vis.shape[0]//2:vis.shape[0]//2+100]) ] )
+plt.plot(wvl * np.array(ucoord[vis.shape[0]//2:vis.shape[0]//2+100] ),  abs(V_disk),'o',color='k' )  
+#predicted
+ax2=plt.twinx()
+#ax2.plot( wvl * ucoord[vis.shape[0]//2:vis.shape[0]//2+100]  ,  abs(vis)[vis.shape[0]//2:vis.shape[0]//2+100,vis.shape[0]//2] , lw = 2 )
+#can even do diagonal 
+ax2.plot(wvl * np.sqrt(2) * ucoord[vis.shape[0]//2:vis.shape[0]//2+100] , np.diag(abs(vis)[vis.shape[0]//2:vis.shape[0]//2+100,vis.shape[0]//2:vis.shape[0]//2+100]))
+
+# the |V| cut in UV plane matches theory for a disk structure
+
+# == get V at VLTI u,v points == Check this also matches
+
+#just do nearest neighbour interp (should be fine with good image sampling)
+U_indx = [np.argmin(abs(ucoord - sss)) for sss in Usamp]  
+V_indx = [np.argmin(abs(ucoord - sss)) for sss in Vsamp]  
+#can check differences:  wvl*ucoord[U_indx[0]] , Usamp[0] * wvl
+
+
+# look where these interp coordinate points are in UV 
+plt.figure()
+plt.title('|V| simulation UD')
+plt.pcolormesh(ucoord[700:900],ucoord[700:900], abs(vis)[700:900,700:900])
+plt.plot(ucoord[U_indx],ucoord[V_indx],'o',color='r')
+plt.plot(Usamp,Vsamp,'x',color='w')
+
+## now I could even do a mesh grid with theoretical to make sure we're sampling same place 
+uuu,vvv = np.meshgrid(ucoord[ucoord!=0],ucoord[ucoord!=0])
+DDD =  2 * Rp/stellar_dist
+plt.figure()
+V_2Ddisk = special.j1(np.pi * DDD * np.sqrt(uuu**2 + vvv**2)) / (np.pi * DDD * np.sqrt(uuu**2 +vvv**2))
+plt.title('|V| theory UD')
+plt.pcolormesh(ucoord[700:900],ucoord[700:900], abs(V_2Ddisk)[700:900,700:900] )
+plt.plot(ucoord[U_indx],ucoord[V_indx],'o',color='r')
+plt.plot(Usamp,Vsamp,'x',color='w')
+
+##--- pretty much checks out.. so the issue must be below:
+# ----------  if we use V_2Ddisk instead of vis do we still get an error??
+
+B_samp = wvl * np.array( [np.sqrt(ucoord[i]**2 + ucoord[j]**2) for (i,j) in zip(U_indx, V_indx) ] )
+vis_samp = np.array([V_2Ddisk[i,j] for (i,j) in zip(U_indx,V_indx)])
+
+#### LETS SEE HOW WELL ALGORITHM MATCHES THEORY 
+
+plt.figure()
+plt.plot( B_samp , abs(vis_samp),'o',label='|V| simulation UD',color='r')
+V_disk =  np.array([(special.j1(np.pi * DDD * b / wvl) / (np.pi * DDD * b /wvl) ) for b in B_samp])
+ax2=plt.twinx()
+ax2.plot( B_samp, abs(V_disk) ,'x', label='|V| theory UD',  color='k')
+plt.legend()
+
+#%%
+
+
+
+
+plt.plot( B_samp , abs(vis_samp)/max(abs(vis_samp)),'o',label='pred')
+V_disk =  [(special.j1(np.pi * DDD * b / wvl) / (np.pi * DDD * b /wvl) ) for b in B_samp]
+
+plt.plot( B_samp,V_disk ,'x', label='theory' )
+
+V_disk =  [(special.j1(np.pi *  DDD * b/ wvl) / (np.pi *  DDD * b/wvl) ) for b in np.linspace(0,100,200)]
+plt.plot( np.linspace(0,100,200), V_disk/max(V_disk ) ) 
+plt.legend()
+
+
+
+
+
+DDD =  Rp/stellar_dist
+plt.plot( B_scalar , abs(vis_samp)/max(abs(vis_samp)),'o',label='pred')
+V_disk =  [(special.j1(np.pi * DDD * b / wvl) / (np.pi * DDD * b /wvl) ) for b in B_scalar]
+plt.plot( B_scalar, V_disk/max(V_disk ) ,'x', label='theory' )
+
+
+V_disk =  [abs(special.j1(np.pi *  DDD * b/ wvl) / (np.pi *  DDD * b/wvl) ) for b in np.linspace(0.1,100,200)]
+plt.plot( np.linspace(0,100,200), V_disk/max(V_disk ) ) 
+ax2 = plt.twinx()
+ax2.plot(B_samp , abs(vis_samp),'x')
+plt.legend()
 
 
 #%%
